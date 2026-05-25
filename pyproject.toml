@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PBstats"
-version = "0.1.0"
+version = "0.1.1"
 description = "Signal-aware data analysis and preprocessing framework"
 authors = [{ name = "Pallab Biswas", email = "pallabbiswas891@gmail.com" }]
 readme = "README.md"
