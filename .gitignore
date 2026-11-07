@@ -156,3 +156,6 @@ ecg_pipeline.json
 *.jpg
 *.pdf
 output/
+
+# PBstats demo output
+demo_output/

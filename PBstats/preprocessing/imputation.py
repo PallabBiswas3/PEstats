@@ -1,60 +1,39 @@
 from __future__ import annotations
+
 import numpy as np
+
+from PBstats.core.steps import step
+
 
 class ImputationMixin:
     """
-    Methods: impute
-    More sophisticated missing value handling for 2D (tabular) data.
-    For 1D signals, remove_missing() in CleaningMixin is sufficient.
+    impute — missing-value handling with tabular-style methods.
+
+    For signals, ``remove_missing()`` (interpolation) is usually best.
+    ``impute()`` adds ``knn``, which fills a channel's gaps using the other
+    channels (rows with similar values elsewhere) — useful for multichannel
+    sensor arrays with dropouts on individual channels.
     """
 
-    def impute(self, method: str = "mean") -> "ImputationMixin":
+    @step
+    def impute(self, method: str = "mean", n_neighbors: int = 5) -> "ImputationMixin":
         """
-        Fill NaNs in a 2D array column-by-column.
+        Fill NaNs column-by-column.
 
         Parameters
         ----------
-        method : 'mean'   — fill with column mean
-                 'median' — fill with column median
-                 'ffill'  — forward-fill (carry last valid value forward)
-                 'bfill'  — backward-fill
+        method : 'mean' | 'median' | 'ffill' | 'bfill' | 'interpolate' | 'zero'
+                 | 'knn' (2D only; uses sklearn's KNNImputer)
         """
-        if self.data.ndim == 1:
-            # Redirect 1D to the simpler cleaner
-            return self.remove_missing(
-                strategy="interpolate" if method in ("ffill","bfill") else method
-            )
+        if method == "knn":
+            if self.data.ndim != 2:
+                raise ValueError("impute(method='knn') needs multichannel (2D) data.")
+            from sklearn.impute import KNNImputer
+            n_missing = int(np.isnan(self.data).sum())
+            self.data = KNNImputer(n_neighbors=n_neighbors).fit_transform(self.data)
+            self._record(f"impute(method=knn, n_missing={n_missing})")
+            return self
 
-        x = self.data.astype(float)
-
-        for col in range(x.shape[1]):
-            column = x[:, col]
-            nan_mask = np.isnan(column)
-            if not nan_mask.any():
-                continue
-
-            if method == "mean":
-                column[nan_mask] = np.nanmean(column)
-            elif method == "median":
-                column[nan_mask] = np.nanmedian(column)
-            elif method == "ffill":
-                # Vectorized ffill: mask valid indices, then use ffill logic
-                mask = ~nan_mask
-                idx = np.where(mask, np.arange(len(column)), 0)
-                np.maximum.accumulate(idx, out=idx)
-                column[:] = column[idx]
-            elif method == "bfill":
-                # Vectorized bfill: reverse, ffill, reverse
-                mask = ~nan_mask
-                idx = np.where(mask, np.arange(len(column)), len(column) - 1)
-                # Reverse accumulation for bfill
-                idx = len(column) - 1 - np.maximum.accumulate((len(column) - 1 - idx)[::-1])[::-1]
-                column[:] = column[idx]
-            else:
-                raise ValueError(f"Unknown method '{method}'. "
-                                 f"Choose: mean, median, ffill, bfill")
-            x[:, col] = column
-
-        self.data = x
-        self._record(f"impute(method={method})")
+        # Every other method shares the per-channel implementation.
+        self.remove_missing(strategy=method)
         return self

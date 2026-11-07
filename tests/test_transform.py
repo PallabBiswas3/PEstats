@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
+
 from PBstats import Data
+
 
 @pytest.fixture
 def mixed_signal():

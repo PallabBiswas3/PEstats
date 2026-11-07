@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PBstats"
-version = "0.1.1"
-description = "Signal-aware data analysis and preprocessing framework"
+version = "0.2.0"
+description = "Signal-aware analysis: diagnose, clean, transform and featurise time series for ML"
 authors = [{ name = "Pallab Biswas", email = "pallabbiswas891@gmail.com" }]
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
+keywords = ["signal processing", "time series", "biosignals", "feature extraction", "machine learning", "ECG", "EEG"]
 dependencies = [
     "numpy>=1.26",
     "scipy>=1.12",
@@ -24,3 +26,9 @@ dev = ["pytest", "black", "ruff", "mypy"]
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["PBstats*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Always test the source tree, never a stale installed copy.
+pythonpath = ["."]

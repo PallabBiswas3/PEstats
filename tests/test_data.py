@@ -1,6 +1,7 @@
 import numpy as np
-import pytest
+
 from PBstats import Data
+
 
 def test_preprocessing_chain():
     """Test a standard sequence of cleaning and normalization."""

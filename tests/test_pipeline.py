@@ -1,8 +1,10 @@
+import os
+
 import numpy as np
 import pytest
-import os
-import json
-from PBstats import Data, Pipeline, FunctionalPipeline
+
+from PBstats import Data, FunctionalPipeline, Pipeline
+
 
 @pytest.fixture
 def ecg_generator():

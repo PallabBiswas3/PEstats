@@ -1,247 +1,145 @@
 from __future__ import annotations
+
+from dataclasses import dataclass
+from fractions import Fraction
+
 import numpy as np
 from scipy.signal import (
-    butter, iirnotch, iirpeak,
-    filtfilt, sosfiltfilt,
-    resample_poly, firwin,
-    butter as _butter,
+    butter,
+    filtfilt,
+    firwin,
+    iirnotch,
+    lfilter,
+    resample_poly,
+    savgol_filter,
+    sosfilt,
+    sosfiltfilt,
 )
-from dataclasses import dataclass, field
-from typing import Optional
+
+from PBstats.core.steps import step
+from PBstats.core.utils import check_length, per_channel, safe_print
+
 
 @dataclass
 class FilterResult:
-    """Stores metadata about the last filter applied."""
-    filter_type:  str
-    cutoff:       object          # float or tuple
-    order:        int
-    fs:           float
-    zero_phase:   bool = True
-    label:        str  = ""
+    """Metadata about the last filter applied."""
+    filter_type: str
+    cutoff: object          # float, tuple or list
+    order: int
+    fs: float
+    zero_phase: bool = True
+    label: str = ""
 
     def summary(self) -> None:
-        print(f"\nFilter applied: {self.filter_type}")
-        print(f"  Cutoff  : {self.cutoff} Hz")
-        print(f"  Order   : {self.order}")
-        print(f"  fs      : {self.fs} Hz")
-        print(f"  Method  : {'filtfilt (zero-phase)' if self.zero_phase else 'lfilter (causal)'}")
+        safe_print(f"\nFilter applied: {self.filter_type}")
+        safe_print(f"  Cutoff  : {self.cutoff} Hz")
+        safe_print(f"  Order   : {self.order}")
+        safe_print(f"  fs      : {self.fs} Hz")
+        safe_print(f"  Method  : {'filtfilt (zero-phase)' if self.zero_phase else 'causal'}")
 
 
 class FilterMixin:
     """
-    Adds surgical filtering methods to the Data class.
+    Frequency-selective filtering. Zero-phase (forward-backward) by default,
+    so peaks stay exactly where they were in time — critical for ECG/EEG
+    timing analysis. Multichannel data is filtered along time (axis 0).
 
-    All filters use filtfilt (zero-phase) by default.
-    filtfilt applies the filter twice — forward and backward —
-    which cancels phase distortion so signal peaks stay
-    exactly where they were in time. Critical for EEG, ECG,
-    and any analysis where timing matters.
-
-    Design: every method returns self so chaining works:
+    Every method returns self:
         Data(ecg, fs=1000).notch(50).bandpass(0.5, 40).hilbert()
     """
 
-    def _require_fs(self, method_name: str) -> None:
-        if self.fs is None:
+    # ── internals ─────────────────────────────────────────────────────────
+
+    def _nyquist(self, method: str) -> float:
+        self._require_fs(method)
+        return self.fs / 2.0
+
+    def _check_cutoff(self, f: float, nyq: float, method: str) -> None:
+        if not 0 < f < nyq:
             raise ValueError(
-                f"{method_name} requires fs. "
-                f"Set it when creating Data: Data(signal, fs=1000)"
+                f"{method}: cutoff {f} Hz must be within (0, {nyq}) Hz (Nyquist = fs/2)"
             )
 
-    # ── 1. Butterworth lowpass ─────────────────────────────────────────────
+    def _apply_sos(self, sos: np.ndarray, zero_phase: bool, method: str) -> None:
+        x = self.data
+        if zero_phase:
+            # sosfiltfilt's default padding length
+            padlen = 3 * (2 * len(sos) + 1 - min((sos[:, 2] == 0).sum(), (sos[:, 5] == 0).sum()))
+            check_length(x, padlen + 1, method)
+            self.data = sosfiltfilt(sos, x, axis=0)
+        else:
+            self.data = sosfilt(sos, x, axis=0)
 
-    def lowpass(
-        self,
-        cutoff: float,
-        order: int = 4,
-        zero_phase: bool = True,
-    ) -> "FilterMixin":
-        """
-        Remove frequencies ABOVE cutoff.
+    def _butter(self, kind, cutoff, btype, order, zero_phase, record):
+        nyq = self._nyquist(kind)
+        cutoffs = cutoff if isinstance(cutoff, (tuple, list)) else (cutoff,)
+        for c in cutoffs:
+            self._check_cutoff(c, nyq, kind)
+        if len(cutoffs) == 2 and cutoffs[0] >= cutoffs[1]:
+            raise ValueError(f"{kind}: low ({cutoffs[0]}) must be less than high ({cutoffs[1]})")
 
-        Use cases:
-          - Remove EMG noise from ECG (cutoff ~40 Hz)
-          - Smooth a signal while preserving slow trends
-          - Anti-aliasing before downsampling
-
-        Parameters
-        ----------
-        cutoff     : cutoff frequency in Hz
-        order      : filter steepness (4 is standard; higher = sharper but
-                     may ring on transients — don't go above 8)
-        zero_phase : True = filtfilt (no phase shift, recommended)
-                     False = causal lfilter (real-time processing only)
-
-        Example
-        -------
-        Data(eeg, fs=256).lowpass(cutoff=40)
-        """
-        self._require_fs("lowpass")
-        nyq = self.fs / 2.0
-        if cutoff >= nyq:
-            raise ValueError(
-                f"Cutoff {cutoff} Hz must be below Nyquist ({nyq} Hz)"
-            )
-
-        sos = butter(order, cutoff / nyq, btype="low", output="sos")
-        self.data = (
-            sosfiltfilt(sos, self.data)
-            if zero_phase
-            else self._sosfilt_causal(sos, self.data)
-        )
-
+        sos = butter(order, cutoff, btype=btype, fs=self.fs, output="sos")
+        self._apply_sos(sos, zero_phase, kind)
         self.filter_result = FilterResult(
-            filter_type="Butterworth lowpass",
-            cutoff=cutoff, order=order,
+            filter_type=f"Butterworth {kind}", cutoff=cutoff, order=order,
             fs=self.fs, zero_phase=zero_phase, label=self.label,
         )
-        self._record(f"lowpass(cutoff={cutoff}Hz, order={order})")
+        self._record(record)
         return self
 
-    # ── 2. Butterworth highpass ────────────────────────────────────────────
+    # ── Butterworth family ────────────────────────────────────────────────
 
-    def highpass(
-        self,
-        cutoff: float,
-        order: int = 4,
-        zero_phase: bool = True,
-    ) -> "FilterMixin":
+    @step
+    def lowpass(self, cutoff: float, order: int = 4, zero_phase: bool = True) -> "FilterMixin":
         """
-        Remove frequencies BELOW cutoff.
+        Remove frequencies ABOVE cutoff (EMG noise in ECG ~40 Hz, smoothing,
+        anti-aliasing). order: steepness, 4 is standard; avoid > 8.
 
-        Use cases:
-          - Remove slow baseline drift from ECG (cutoff ~0.5 Hz)
-          - Remove DC offset and slow wandering
-          - Isolate action potentials in neural spike data
-
-        Parameters
-        ----------
-        cutoff : cutoff frequency in Hz (typically 0.5–5 Hz for biomedical)
-
-        Example
-        -------
-        Data(ecg, fs=1000).highpass(cutoff=0.5)   # remove baseline wander
+        Example: Data(eeg, fs=256).lowpass(40)
         """
-        self._require_fs("highpass")
-        nyq = self.fs / 2.0
-        if cutoff >= nyq:
-            raise ValueError(f"Cutoff {cutoff} Hz must be below Nyquist ({nyq} Hz)")
+        return self._butter("lowpass", cutoff, "low", order, zero_phase,
+                            f"lowpass(cutoff={cutoff}Hz, order={order})")
 
-        sos = butter(order, cutoff / nyq, btype="high", output="sos")
-        self.data = (
-            sosfiltfilt(sos, self.data)
-            if zero_phase
-            else self._sosfilt_causal(sos, self.data)
-        )
+    @step
+    def highpass(self, cutoff: float, order: int = 4, zero_phase: bool = True) -> "FilterMixin":
+        """
+        Remove frequencies BELOW cutoff (baseline wander ~0.5 Hz, DC drift).
 
-        self.filter_result = FilterResult(
-            filter_type="Butterworth highpass",
-            cutoff=cutoff, order=order,
-            fs=self.fs, zero_phase=zero_phase, label=self.label,
-        )
-        self._record(f"highpass(cutoff={cutoff}Hz, order={order})")
-        return self
+        Example: Data(ecg, fs=1000).highpass(0.5)
+        """
+        return self._butter("highpass", cutoff, "high", order, zero_phase,
+                            f"highpass(cutoff={cutoff}Hz, order={order})")
 
-    # ── 3. Butterworth bandpass ────────────────────────────────────────────
-
+    @step
     def bandpass(
-        self,
-        low: float,
-        high: float,
-        order: int = 4,
-        zero_phase: bool = True,
+        self, low: float, high: float, order: int = 4, zero_phase: bool = True,
     ) -> "FilterMixin":
         """
-        Keep only frequencies BETWEEN low and high. Everything outside
-        is attenuated.
+        Keep only [low, high] Hz.
 
-        EEG frequency bands (standard):
-          Delta  : 0.5 –  4 Hz  (deep sleep)
-          Theta  : 4   –  8 Hz  (drowsiness, meditation)
-          Alpha  : 8   – 13 Hz  (relaxed wakefulness)
-          Beta   : 13  – 30 Hz  (active thinking)
-          Gamma  : 30  – 80 Hz  (high cognition)
+        EEG bands: delta 0.5–4, theta 4–8, alpha 8–13, beta 13–30, gamma 30–80.
+        ECG: bandpass(0.5, 40). EMG: bandpass(20, 450).
 
-        ECG: bandpass(0.5, 40) removes both drift and EMG noise.
-        EMG: bandpass(20, 450) isolates muscle activation.
-        FTIR: used for isolating specific absorption band regions.
-
-        Parameters
-        ----------
-        low, high : frequency band edges in Hz
-
-        Example
-        -------
-        Data(eeg, fs=256).bandpass(8, 13)   # isolate alpha band
+        Example: Data(eeg, fs=256).bandpass(8, 13)   # alpha
         """
-        self._require_fs("bandpass")
-        nyq = self.fs / 2.0
-        if low <= 0 or high >= nyq:
-            raise ValueError(
-                f"Band [{low}, {high}] Hz must be within (0, {nyq}) Hz"
-            )
-        if low >= high:
-            raise ValueError(f"low ({low}) must be less than high ({high})")
+        return self._butter("bandpass", (low, high), "bandpass", order, zero_phase,
+                            f"bandpass(low={low}Hz, high={high}Hz, order={order})")
 
-        sos = butter(order, [low / nyq, high / nyq], btype="band", output="sos")
-        self.data = (
-            sosfiltfilt(sos, self.data)
-            if zero_phase
-            else self._sosfilt_causal(sos, self.data)
-        )
-
-        self.filter_result = FilterResult(
-            filter_type="Butterworth bandpass",
-            cutoff=(low, high), order=order,
-            fs=self.fs, zero_phase=zero_phase, label=self.label,
-        )
-        self._record(f"bandpass(low={low}Hz, high={high}Hz, order={order})")
-        return self
-
-    # ── 4. Bandstop (notch) ────────────────────────────────────────────────
-
+    @step
     def bandstop(
-        self,
-        low: float,
-        high: float,
-        order: int = 4,
-        zero_phase: bool = True,
+        self, low: float, high: float, order: int = 4, zero_phase: bool = True,
     ) -> "FilterMixin":
         """
-        Remove a specific frequency BAND (wider notch than notch()).
+        Remove the band [low, high] Hz. For a single sharp frequency use notch().
 
-        Use when you need to remove a wide noise band rather than
-        a sharp single frequency. For surgical single-frequency
-        removal, use notch() instead.
-
-        Parameters
-        ----------
-        low, high : edges of the band to remove in Hz
-
-        Example
-        -------
-        Data(signal, fs=1000).bandstop(45, 55)  # wide power-line removal
+        Example: Data(sig, fs=1000).bandstop(45, 55)
         """
-        self._require_fs("bandstop")
-        nyq = self.fs / 2.0
+        return self._butter("bandstop", (low, high), "bandstop", order, zero_phase,
+                            f"bandstop(low={low}Hz, high={high}Hz, order={order})")
 
-        sos = butter(order, [low / nyq, high / nyq], btype="bandstop", output="sos")
-        self.data = (
-            sosfiltfilt(sos, self.data)
-            if zero_phase
-            else self._sosfilt_causal(sos, self.data)
-        )
+    # ── Notch ─────────────────────────────────────────────────────────────
 
-        self.filter_result = FilterResult(
-            filter_type="Butterworth bandstop",
-            cutoff=(low, high), order=order,
-            fs=self.fs, zero_phase=zero_phase, label=self.label,
-        )
-        self._record(f"bandstop(low={low}Hz, high={high}Hz)")
-        return self
-
-    # ── 5. Notch filter ────────────────────────────────────────────────────
-
+    @step
     def notch(
         self,
         freq: float,
@@ -250,65 +148,43 @@ class FilterMixin:
         zero_phase: bool = True,
     ) -> "FilterMixin":
         """
-        Surgically remove a single frequency (like a laser cut).
+        Surgically remove one frequency — the standard fix for power-line
+        interference (50 Hz: Europe/Asia/Africa/India; 60 Hz: Americas).
 
-        This is the standard tool for removing power-line interference:
-          - 50 Hz in Europe, Asia, Africa, India
-          - 60 Hz in North America, parts of South America
+        quality   : Q factor; higher = narrower notch. 30 is the clinical
+                    default; ~10 for drifting interference.
+        harmonics : also notch 2f, 3f, ... below Nyquist.
 
-        How it works:
-          iirnotch designs an IIR notch filter with a very narrow
-          rejection band centred on freq. The quality factor (Q)
-          controls the width: higher Q = narrower notch = more
-          surgical but more sensitive to exact frequency.
-
-        Parameters
-        ----------
-        freq      : frequency to remove in Hz (50 or 60 typically)
-        quality   : Q factor. Higher = narrower notch.
-                    Q=30 is the standard clinical default.
-                    Q=10 for slightly drifting interference.
-        harmonics : if True, also notch 2×freq, 3×freq, 4×freq.
-                    Power lines produce harmonics (100Hz, 150Hz etc.)
-                    that can also contaminate the signal.
-        zero_phase : True = filtfilt (recommended)
-
-        Example
-        -------
-        Data(ecg, fs=1000).notch(50)                    # India/EU
-        Data(ecg, fs=1000).notch(60, harmonics=True)    # USA + overtones
-        Data(eeg, fs=256).notch(50).bandpass(1, 100)    # standard EEG chain
+        Example: Data(ecg, fs=1000).notch(50, harmonics=True)
         """
-        self._require_fs("notch")
-        nyq = self.fs / 2.0
+        nyq = self._nyquist("notch")
+        self._check_cutoff(freq, nyq, "notch")
 
-        freqs_to_notch = [freq]
+        freqs = [freq]
         if harmonics:
             k = 2
             while freq * k < nyq:
-                freqs_to_notch.append(freq * k)
+                freqs.append(freq * k)
                 k += 1
 
-        for f in freqs_to_notch:
-            w0 = f / nyq
-            b, a = iirnotch(w0, quality)
+        for f in freqs:
+            b, a = iirnotch(f, quality, fs=self.fs)
             if zero_phase:
-                self.data = filtfilt(b, a, self.data)
+                check_length(self.data, 3 * max(len(a), len(b)) + 1, "notch")
+                self.data = filtfilt(b, a, self.data, axis=0)
             else:
-                from scipy.signal import lfilter
-                self.data = lfilter(b, a, self.data)
+                self.data = lfilter(b, a, self.data, axis=0)
 
         self.filter_result = FilterResult(
-            filter_type=f"Notch (IIR)",
-            cutoff=freqs_to_notch, order=2,
+            filter_type="Notch (IIR)", cutoff=freqs, order=2,
             fs=self.fs, zero_phase=zero_phase, label=self.label,
         )
-        notch_str = f"notch(freq={freq}Hz, Q={quality}, harmonics={harmonics})"
-        self._record(notch_str)
+        self._record(f"notch(freq={freq}Hz, Q={quality}, harmonics={harmonics})")
         return self
 
-    # ── 6. FIR filter (window method) ─────────────────────────────────────
+    # ── FIR ───────────────────────────────────────────────────────────────
 
+    @step
     def fir_filter(
         self,
         cutoff,
@@ -317,221 +193,137 @@ class FilterMixin:
         window: str = "hamming",
     ) -> "FilterMixin":
         """
-        FIR (Finite Impulse Response) filter — linear phase guaranteed.
+        Linear-phase FIR filter (window method), applied zero-phase.
+        Prefer it over Butterworth when waveform shape must be preserved
+        (ERPs, spike sorting) or guaranteed stability matters.
 
-        When to prefer FIR over Butterworth (IIR):
-          - When you need guaranteed linear phase (group delay constant
-            across all frequencies — important for preserving waveform
-            shape in ERPs and spike sorting).
-          - When filter stability is critical (FIR is always stable).
+        cutoff      : float or [low, high] Hz
+        filter_type : 'lowpass' | 'highpass' | 'bandpass' | 'bandstop'
+        numtaps     : filter length (forced odd)
 
-        When to prefer Butterworth:
-          - When you need a steeper rolloff for the same number of taps.
-          - When computational cost matters.
-
-        Parameters
-        ----------
-        cutoff      : float or [low, high] in Hz
-        filter_type : 'lowpass', 'highpass', 'bandpass', 'bandstop'
-        numtaps     : filter length. Odd number required. More taps =
-                      sharper cutoff but more latency.
-        window      : window function for FIR design.
-                      'hamming'   — good sidelobe suppression (default)
-                      'blackman'  — better stopband, wider transition
-                      'hann'      — smooth spectral roll-off
-
-        Example
-        -------
-        Data(erp, fs=1000).fir_filter([1, 40], filter_type="bandpass")
+        Example: Data(erp, fs=1000).fir_filter([1, 40], filter_type="bandpass")
         """
-        self._require_fs("fir_filter")
-        nyq = self.fs / 2.0
-
-        if isinstance(cutoff, (int, float)):
-            cutoff_norm = cutoff / nyq
-        else:
-            cutoff_norm = [c / nyq for c in cutoff]
-
+        nyq = self._nyquist("fir_filter")
+        valid = ("lowpass", "highpass", "bandpass", "bandstop")
+        if filter_type not in valid:
+            raise ValueError(f"filter_type must be one of {valid}")
+        cutoffs = [cutoff] if np.isscalar(cutoff) else list(cutoff)
+        for c in cutoffs:
+            self._check_cutoff(c, nyq, "fir_filter")
         if numtaps % 2 == 0:
-            numtaps += 1     # FIR requires odd tap count for Type I
+            numtaps += 1  # odd length => Type I, valid for every response type
 
-        taps = firwin(numtaps, cutoff_norm, window=window, pass_zero=(
-            filter_type in ("lowpass", "bandstop")
-        ))
-
-        self.data = filtfilt(taps, [1.0], self.data)
+        taps = firwin(numtaps, cutoffs if len(cutoffs) > 1 else cutoffs[0],
+                      window=window, pass_zero=filter_type in ("lowpass", "bandstop"),
+                      fs=self.fs)
+        check_length(self.data, 3 * numtaps + 1, "fir_filter")
+        self.data = filtfilt(taps, [1.0], self.data, axis=0)
 
         self.filter_result = FilterResult(
-            filter_type=f"FIR {filter_type}",
-            cutoff=cutoff, order=numtaps,
+            filter_type=f"FIR {filter_type}", cutoff=cutoff, order=numtaps,
             fs=self.fs, zero_phase=True, label=self.label,
         )
         self._record(f"fir_filter(cutoff={cutoff}, type={filter_type}, taps={numtaps})")
         return self
 
-    # ── 7. Savitzky-Golay smoothing ───────────────────────────────────────
+    # ── Smoothing ─────────────────────────────────────────────────────────
 
-    def savgol(
-        self,
-        window_length: int = 11,
-        polyorder: int = 3,
-    ) -> "FilterMixin":
+    @step
+    def savgol(self, window_length: int = 11, polyorder: int = 3) -> "FilterMixin":
         """
-        Savitzky-Golay smoothing filter.
+        Savitzky-Golay smoothing: fits local polynomials, preserving peak
+        height and position far better than a lowpass. Standard for
+        FTIR/Raman spectra and QRS-preserving ECG smoothing.
 
-        Unlike Butterworth, SavGol fits a local polynomial to each
-        window rather than attenuating frequencies. This preserves
-        peak shapes and amplitudes much better than lowpass filtering.
-
-        Ideal for:
-          - FTIR and Raman spectral smoothing (standard in chemistry)
-          - Smoothing ECG peaks without distorting the QRS complex
-          - Any signal where preserving peak position + height matters
-
-        Parameters
-        ----------
-        window_length : number of samples in the sliding window.
-                        Must be odd and > polyorder.
-                        Larger = smoother but risks oversmoothing peaks.
-        polyorder     : degree of the fitting polynomial.
-                        3 or 4 is standard for biomedical signals.
-
-        Example
-        -------
-        Data(ftir, fs=1).savgol(window_length=15, polyorder=3)
+        Example: Data(ftir).savgol(window_length=15, polyorder=3)
         """
-        from scipy.signal import savgol_filter
         if window_length % 2 == 0:
             window_length += 1
         if window_length <= polyorder:
             raise ValueError("window_length must be greater than polyorder")
-
-        self.data = savgol_filter(self.data, window_length, polyorder)
+        check_length(self.data, window_length, "savgol")
+        self.data = savgol_filter(self.data, window_length, polyorder, axis=0)
         self._record(f"savgol(window={window_length}, poly={polyorder})")
         return self
 
-    # ── 8. Resampling ─────────────────────────────────────────────────────
+    @step
+    def median_filter(self, kernel: int = 5) -> "FilterMixin":
+        """
+        Rolling median — removes isolated spikes / impulse noise while
+        keeping edges sharp (a linear filter would smear them).
+        """
+        from PBstats.preprocessing.outliers import rolling_median
+        self.data = per_channel(lambda c: rolling_median(c, kernel), self.data)
+        self._record(f"median_filter(kernel={kernel})")
+        return self
 
+    # ── Resampling ────────────────────────────────────────────────────────
+
+    @step
     def resample(self, target_fs: float) -> "FilterMixin":
         """
-        Resample the signal to a new sampling frequency.
+        Resample to a new rate with polyphase filtering (built-in
+        anti-aliasing). Handles non-integer rates, e.g. 250.5 → 128 Hz.
 
-        Uses polyphase filtering (resample_poly) — the gold standard.
-        Automatically applies anti-aliasing when downsampling so you
-        don't get aliasing artifacts.
-
-        Use cases:
-          - Downsampling EEG from 2048 Hz to 256 Hz (saves 8× memory
-            and compute for downstream ML)
-          - Aligning two signals recorded at different rates
-          - Standardising dataset sampling rates before batch processing
-
-        Parameters
-        ----------
-        target_fs : desired sampling frequency in Hz
-
-        Example
-        -------
-        Data(eeg, fs=2048).resample(256)   # 8x downsample
+        Example: Data(eeg, fs=2048).resample(256)
         """
         self._require_fs("resample")
-        from math import gcd
+        if target_fs <= 0:
+            raise ValueError("target_fs must be positive")
+        ratio = Fraction(float(target_fs) / float(self.fs)).limit_denominator(1000)
+        self.data = resample_poly(self.data, ratio.numerator, ratio.denominator, axis=0)
 
-        orig_fs = int(round(self.fs))
-        tgt_fs  = int(round(target_fs))
-        g       = gcd(orig_fs, tgt_fs)
-        up, down = tgt_fs // g, orig_fs // g
-
-        self.data = resample_poly(self.data, up, down).astype(float)
-
-        old_fs   = self.fs
-        self.fs  = target_fs
+        old_fs = self.fs
+        self.fs = float(target_fs)
         self._record(f"resample({old_fs}Hz → {target_fs}Hz)")
         return self
 
-    # ── 9. Filter visualiser ──────────────────────────────────────────────
+    # ── Visual check ──────────────────────────────────────────────────────
 
     def plot_filter_response(
         self,
         cutoff,
         filter_type: str = "bandpass",
         order: int = 4,
-        save_path: str = None,
+        quality: float = 30.0,
+        save_path: str | None = None,
     ) -> "FilterMixin":
         """
-        Plot the frequency response of a filter BEFORE applying it.
-        Lets you verify the filter is doing what you expect.
+        Plot magnitude and phase response of a filter BEFORE applying it.
 
-        Parameters
-        ----------
-        cutoff      : same as the filter methods
-        filter_type : 'lowpass', 'highpass', 'bandpass', 'notch'
-        order       : Butterworth filter order
+        filter_type : 'lowpass' | 'highpass' | 'bandpass' | 'bandstop' | 'notch'
         """
         self._require_fs("plot_filter_response")
         import matplotlib.pyplot as plt
-        from scipy.signal import freqz
+        from scipy.signal import freqz, sosfreqz
 
-        nyq = self.fs / 2.0
+        from PBstats.visualization.base import COLORS, save_or_show, style
 
         if filter_type == "notch":
-            from scipy.signal import iirnotch
-            w0 = cutoff / nyq
-            b, a = iirnotch(w0, 30)
+            b, a = iirnotch(cutoff, quality, fs=self.fs)
+            w, h = freqz(b, a, worN=4096, fs=self.fs)
         else:
-            btype_map = {
-                "lowpass":  "low",
-                "highpass": "high",
-                "bandpass": "band",
-                "bandstop": "bandstop",
-            }
-            btype = btype_map.get(filter_type, "band")
-            if isinstance(cutoff, (int, float)):
-                wn = cutoff / nyq
-            else:
-                wn = [c / nyq for c in cutoff]
-            b, a = butter(order, wn, btype=btype)
+            btype = {"lowpass": "low", "highpass": "high",
+                     "bandpass": "bandpass", "bandstop": "bandstop"}.get(filter_type)
+            if btype is None:
+                raise ValueError(f"Unknown filter_type '{filter_type}'")
+            sos = butter(order, cutoff, btype=btype, fs=self.fs, output="sos")
+            w, h = sosfreqz(sos, worN=4096, fs=self.fs)
 
-        w, h = freqz(b, a, worN=4096, fs=self.fs)
-        magnitude_db = 20 * np.log10(np.abs(h) + 1e-12)
-
-        fig, axes = plt.subplots(2, 1, figsize=(12, 6))
-        fig.patch.set_facecolor("white")
-        fig.suptitle(f"Filter response — {filter_type}  cutoff={cutoff} Hz",
-                     fontsize=12, fontweight="bold")
-
-        # Magnitude
-        ax = axes[0]
-        ax.plot(w, magnitude_db, color="#5B4FCF", lw=1.5)
-        ax.axhline(-3, color="#D85A30", ls="--", lw=1, label="-3 dB cutoff")
-        ax.axhline(-40, color="#888780", ls=":", lw=0.8, label="-40 dB")
-        ax.set_ylabel("Magnitude (dB)")
-        ax.set_title("Magnitude response")
-        ax.legend(fontsize=9, frameon=False)
-        ax.set_facecolor("#f8f8f8")
-        ax.grid(True, color="white")
-        for sp in ax.spines.values(): sp.set_visible(False)
-
-        # Phase
-        ax2 = axes[1]
-        ax2.plot(w, np.angle(h, deg=True), color="#1D9E75", lw=1.5)
-        ax2.set_xlabel("Frequency (Hz)")
-        ax2.set_ylabel("Phase (degrees)")
-        ax2.set_title("Phase response")
-        ax2.set_facecolor("#f8f8f8")
-        ax2.grid(True, color="white")
-        for sp in ax2.spines.values(): sp.set_visible(False)
-
-        plt.tight_layout()
-        if save_path:
-            fig.savefig(save_path, bbox_inches="tight", dpi=150)
-            plt.close(fig)
-        else:
-            plt.show()
+        with style():
+            fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+            fig.suptitle(f"Filter response — {filter_type}  cutoff={cutoff} Hz",
+                         fontsize=12, fontweight="bold")
+            axes[0].plot(w, 20 * np.log10(np.abs(h) + 1e-12), color=COLORS["primary"])
+            axes[0].axhline(-3, color=COLORS["accent"], ls="--", lw=1, label="-3 dB")
+            axes[0].axhline(-40, color=COLORS["neutral"], ls=":", lw=0.8, label="-40 dB")
+            axes[0].set_ylabel("Magnitude (dB)")
+            axes[0].set_ylim(bottom=max(axes[0].get_ylim()[0], -120))
+            axes[0].legend(fontsize=9, frameon=False)
+            axes[1].plot(w, np.unwrap(np.angle(h)), color=COLORS["secondary"])
+            axes[1].set_xlabel("Frequency (Hz)")
+            axes[1].set_ylabel("Phase (rad)")
+            note = "zero-phase filtering cancels this phase shift" if filter_type != "notch" else ""
+            axes[1].set_title(f"Phase response  {note}", fontsize=10)
+            save_or_show(fig, save_path)
         return self
-
-    # ── internal helper ───────────────────────────────────────────────────
-
-    def _sosfilt_causal(self, sos, x):
-        from scipy.signal import sosfilt
-        return sosfilt(sos, x)

@@ -1,77 +1,69 @@
 from __future__ import annotations
+
 import numpy as np
 
-class NormalizationMixin:
-    """
-    Methods: normalize, standardize, minmax, robust_scale
-    """
+from PBstats.core.steps import step
 
+
+def _safe_divide(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+    """num / den, giving 0 wherever den == 0 (constant channels)."""
+    den = np.asarray(den, dtype=float)
+    out = np.zeros_like(num, dtype=float)
+    ok = np.broadcast_to(den != 0, num.shape)
+    np.divide(num, np.broadcast_to(den, num.shape), out=out, where=ok)
+    return out
+
+
+class NormalizationMixin:
+    """normalize, standardize, minmax, robust_scale — all per channel."""
+
+    @step
     def normalize(self, method: str = "minmax") -> "NormalizationMixin":
         """
-        Convenience wrapper — calls the right method by name.
-
-        Parameters
-        ----------
-        method : 'minmax'  — scale to [0, 1]
-                 'zscore'  — zero mean, unit variance
-                 'robust'  — median and IQR based (outlier-resistant)
-                 'l2'      — divide by L2 norm (unit vector)
+        Dispatch by name: 'minmax' → [0, 1], 'zscore' → zero mean / unit
+        variance, 'robust' → median / IQR, 'l2' → unit L2 norm.
         """
         dispatch = {
             "minmax": self.minmax,
             "zscore": self.standardize,
             "robust": self.robust_scale,
-            "l2":     self._l2_norm,
+            "l2": self._l2_norm,
         }
         if method not in dispatch:
-            raise ValueError(f"Unknown method '{method}'. "
-                             f"Choose: {list(dispatch)}")
+            raise ValueError(f"Unknown method '{method}'. Choose: {list(dispatch)}")
         return dispatch[method]()
 
+    @step
     def minmax(self) -> "NormalizationMixin":
-        """Scale to [0, 1]."""
+        """Scale each channel to [0, 1]. Constant channels become 0."""
         x = self.data
-        xmin, xmax = x.min(), x.max()
-        if xmax == xmin:
-            self.data = np.zeros_like(x)
-        else:
-            self.data = (x - xmin) / (xmax - xmin)
+        lo, hi = np.nanmin(x, axis=0), np.nanmax(x, axis=0)
+        self.data = _safe_divide(x - lo, hi - lo)
         self._record("minmax()")
         return self
 
+    @step
     def standardize(self) -> "NormalizationMixin":
-        """Zero mean, unit variance (z-score normalization)."""
+        """Zero mean, unit variance per channel (z-score)."""
         x = self.data
-        std = x.std()
-        if std == 0:
-            self.data = np.zeros_like(x)
-        else:
-            self.data = (x - x.mean()) / std
+        self.data = _safe_divide(x - np.nanmean(x, axis=0), np.nanstd(x, axis=0))
         self._record("standardize()")
         return self
 
+    @step
     def robust_scale(self) -> "NormalizationMixin":
         """
-        Scale using median and IQR instead of mean and std.
-        Much better for biomedical data with spikes or outliers.
+        Centre on the median, scale by the IQR. Much better than z-score for
+        biomedical data with spikes or outliers.
         """
         x = self.data
-        median = np.median(x)
-        q75, q25 = np.percentile(x, [75, 25])
-        iqr = q75 - q25
-        if iqr == 0:
-            self.data = np.zeros_like(x)
-        else:
-            self.data = (x - median) / iqr
+        q25, med, q75 = np.nanpercentile(x, [25, 50, 75], axis=0)
+        self.data = _safe_divide(x - med, q75 - q25)
         self._record("robust_scale()")
         return self
 
     def _l2_norm(self) -> "NormalizationMixin":
-        """Divide by L2 norm — makes the signal a unit vector."""
-        norm = np.linalg.norm(self.data)
-        if norm == 0:
-            self.data = np.zeros_like(self.data)
-        else:
-            self.data = self.data / norm
+        """Divide each channel by its L2 norm."""
+        self.data = _safe_divide(self.data, np.linalg.norm(self.data, axis=0))
         self._record("l2_norm()")
         return self
