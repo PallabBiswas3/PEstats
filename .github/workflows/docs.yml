@@ -21,12 +21,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -e ".[docs]"
-      - run: mkdocs build --strict
+      - name: Build (strict)
+        shell: bash
+        run: |
+          set +e
+          mkdocs build --strict 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          grep -E "WARNING|ERROR|Error" build.log | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+          exit $status
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site/
