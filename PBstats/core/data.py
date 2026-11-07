@@ -7,12 +7,16 @@ import numpy as np
 import pandas as pd
 
 from PBstats.diagnostics.quality import QualityMixin
+from PBstats.epochs import EpochsMixin
+from PBstats.events import EventsMixin
 from PBstats.features.extractor import FeatureMixin
+from PBstats.forecast import ForecastMixin
 from PBstats.preprocessing.cleaning import CleaningMixin
 from PBstats.preprocessing.filters import FilterMixin
 from PBstats.preprocessing.imputation import ImputationMixin
 from PBstats.preprocessing.normalization import NormalizationMixin
 from PBstats.preprocessing.outliers import OutlierMixin
+from PBstats.report import ReportMixin
 from PBstats.statistics.correlation import CorrelationMixin
 from PBstats.statistics.descriptive import DescriptiveMixin
 from PBstats.statistics.hypothesis import HypothesisMixin
@@ -30,7 +34,7 @@ ArrayLike = Union[np.ndarray, pd.Series, pd.DataFrame, list]
 
 # Attributes holding analysis results — cleared by reset().
 _RESULT_ATTRS = ("autocorr", "autocorr_n", "feature_vector", "quality_report",
-                 "quality_report_after", "r_peaks")
+                 "quality_report_after", "r_peaks", "quality_timeline_result")
 
 
 class Data(
@@ -40,10 +44,10 @@ class Data(
     FFTMixin, HilbertMixin, WaveletMixin, STFTMixin,
     # Statistics
     DescriptiveMixin, HypothesisMixin, RegressionMixin, CorrelationMixin,
-    # Features, diagnostics
-    FeatureMixin, QualityMixin,
+    # Features, diagnostics, events
+    FeatureMixin, QualityMixin, EventsMixin, EpochsMixin, ForecastMixin,
     # Output
-    VisualizationMixin,
+    VisualizationMixin, ReportMixin,
 ):
     """
     A signal plus everything done to it.
@@ -56,7 +60,10 @@ class Data(
     fs            : sampling frequency in Hz (needed for filters / spectra)
     label         : name used in plots, reports and feature tables
     channel_names : names for 2D data (default: DataFrame columns or ch0, ch1, …)
+    annotations   : optional events — DataFrame with an ``onset`` column (s)
 
+    Notes
+    -----
     Every processing method mutates ``self.data`` and returns ``self``, so
     calls chain. The original input is kept, so ``reset()`` can undo
     everything, and every call is recorded so ``to_pipeline()`` can replay it.
@@ -68,6 +75,7 @@ class Data(
         fs: Optional[float] = None,
         label: str = "",
         channel_names: Optional[Sequence[str]] = None,
+        annotations: Optional[pd.DataFrame] = None,
     ):
         if fs is not None and not fs > 0:
             raise ValueError(f"fs must be positive, got {fs}")
@@ -87,6 +95,48 @@ class Data(
             )
         self._log: list[str] = []
         self._steps: list[tuple[str, dict]] = []
+        #: Events / labels attached to the recording: DataFrame with an
+        #: ``onset`` column in seconds plus e.g. ``label`` / ``duration``
+        #: (PhysioNet beat labels, EDF+ events, your own markers). None if none.
+        if annotations is not None and "onset" not in annotations:
+            raise ValueError("annotations need an 'onset' column (seconds)")
+        self._raw_annotations = None if annotations is None else annotations.copy()
+        self.annotations: Optional[pd.DataFrame] = (
+            None if annotations is None else annotations.copy())
+        #: Free-form metadata from the source file (units, patient, ...).
+        self.meta: dict = {}
+
+    # ── file readers ──────────────────────────────────────────────────────
+
+    @classmethod
+    def from_csv(cls, path, time_col=None, columns=None, fs=None, **kwargs) -> "Data":
+        """CSV → Data; fs inferred from ``time_col``. See ``PBstats.io.read_csv``."""
+        from PBstats.io import read_csv
+        return read_csv(path, time_col=time_col, columns=columns, fs=fs, **kwargs)
+
+    @classmethod
+    def from_wav(cls, path, **kwargs) -> "Data":
+        """WAV audio → Data (PCM scaled to [-1, 1))."""
+        from PBstats.io import read_wav
+        return read_wav(path, **kwargs)
+
+    @classmethod
+    def from_edf(cls, path, channels=None, **kwargs) -> "Data":
+        """EDF / EDF+ / BDF → Data, with EDF+ events in ``.annotations``."""
+        from PBstats.io import read_edf
+        return read_edf(path, channels=channels, **kwargs)
+
+    @classmethod
+    def from_wfdb(cls, record, channels=None, **kwargs) -> "Data":
+        """Local PhysioNet WFDB record → Data, with beat labels in ``.annotations``."""
+        from PBstats.io import read_wfdb
+        return read_wfdb(record, channels=channels, **kwargs)
+
+    @classmethod
+    def from_physionet(cls, record: str, channels=None, **kwargs) -> "Data":
+        """Download (cached) and read a PhysioNet record, e.g. ``"mitdb/100"``."""
+        from PBstats.io import read_physionet
+        return read_physionet(record, channels=channels, **kwargs)
 
     # ── construction helpers ──────────────────────────────────────────────
 
@@ -122,6 +172,7 @@ class Data(
         """Restore the original data and fs, and clear history and results."""
         self.data = self._raw.copy()
         self.fs = self._raw_fs
+        self.annotations = None if self._raw_annotations is None else self._raw_annotations.copy()
         self._log.clear()
         self._steps.clear()
         for attr in list(vars(self)):
@@ -189,13 +240,17 @@ class Data(
     def channel(self, key: Union[int, str]) -> "Data":
         """A new single-channel Data object for one channel (by index or name)."""
         if self.data.ndim == 1:
-            if key in (0, self.channel_names[0]):
-                return Data(self.data.copy(), fs=self.fs, label=self.label)
-            raise IndexError(f"Single-channel data has no channel {key!r}")
-        names = self.channel_names
-        idx = names.index(key) if isinstance(key, str) else int(key)
-        label = f"{self.label}[{names[idx]}]" if self.label else names[idx]
-        return Data(self.data[:, idx].copy(), fs=self.fs, label=label)
+            if key not in (0, self.channel_names[0]):
+                raise IndexError(f"Single-channel data has no channel {key!r}")
+            out = Data(self.data.copy(), fs=self.fs, label=self.label)
+        else:
+            names = self.channel_names
+            idx = names.index(key) if isinstance(key, str) else int(key)
+            label = f"{self.label}[{names[idx]}]" if self.label else names[idx]
+            out = Data(self.data[:, idx].copy(), fs=self.fs, label=label)
+        out.annotations = None if self.annotations is None else self.annotations.copy()
+        out.meta = dict(self.meta)
+        return out
 
     # ── export ────────────────────────────────────────────────────────────
 

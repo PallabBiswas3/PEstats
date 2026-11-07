@@ -1,0 +1,75 @@
+site_name: PBstats
+site_description: Diagnose, clean, analyse and featurise signals and time series — from raw recording to ML.
+site_url: https://pallabbiswas3.github.io/PEstats/
+repo_url: https://github.com/PallabBiswas3/PEstats
+repo_name: PallabBiswas3/PEstats
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      toggle: {icon: material/weather-sunny, name: Light mode}
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Guides:
+      - Loading data: guides/loading-data.md
+      - Signal diagnosis: guides/diagnosis.md
+      - Pipelines: guides/pipelines.md
+      - ECG & HRV: guides/ecg.md
+      - Events, epochs & forecasting: guides/events.md
+      - Machine learning: guides/machine-learning.md
+      - Reports: guides/reports.md
+  - Benchmarks: benchmarks.md
+  - API reference:
+      - Data: api/data.md
+      - Pipeline: api/pipeline.md
+      - I/O: api/io.md
+      - Diagnostics: api/diagnostics.md
+      - Features & ECG: api/features.md
+      - Machine learning & augmentation: api/ml.md
+  - Changelog: changelog.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 2
+            members_order: source
+            docstring_style: numpy
+            show_signature_annotations: true
+            separate_signature: true
+            filters: ["!^_"]
+            show_if_no_docstring: false
+
+markdown_extensions:
+  - admonition
+  - tables
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - toc:
+      permalink: true

@@ -159,3 +159,6 @@ output/
 
 # PBstats demo output
 demo_output/
+
+# mkdocs build output
+site/

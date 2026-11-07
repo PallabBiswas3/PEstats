@@ -229,7 +229,7 @@ def plot_descriptive(descriptive_result, data: np.ndarray, save_path: str | None
 
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.boxplot(
-        x, vert=True, patch_artist=True, widths=0.5,
+        x, patch_artist=True, widths=0.5,
         boxprops=dict(facecolor=COLORS["primary"], alpha=0.4),
         medianprops=dict(color=COLORS["accent"], linewidth=2),
         whiskerprops=dict(color=COLORS["neutral"]),
@@ -372,5 +372,94 @@ def plot_quality(report, save_path: str | None = None) -> plt.Figure:
         ax2.set_title("Power spectral density")
         ax2.set_xlim(0, f[-1])
 
+    save_or_show(fig, save_path)
+    return fig
+
+
+@styled
+def plot_epochs(epochs, save_path: str | None = None, max_traces: int = 50) -> plt.Figure:
+    """Individual epochs (thin, first channel) with their mean ± SD."""
+    data = epochs.data if epochs.data.ndim == 2 else epochs.data[:, :, 0]
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    t = epochs.times
+    for row in data[:max_traces]:
+        ax.plot(t, row, color=COLORS["neutral"], lw=0.5, alpha=0.35)
+    if len(data):
+        mu, sd = data.mean(axis=0), data.std(axis=0)
+        ax.fill_between(t, mu - sd, mu + sd, color=COLORS["primary"], alpha=0.18, label="± SD")
+        ax.plot(t, mu, color=COLORS["primary"], lw=2.2, label=f"mean (n={len(data)})")
+    ax.axvline(0, color=COLORS["accent"], ls="--", lw=1, label="event")
+    ax.set_xlabel("Time relative to event (s)")
+    ax.set_ylabel("Amplitude")
+    ax.set_title(f"{epochs.label} — epochs")
+    ax.legend(fontsize=9, frameon=False)
+    ax.set_xlim(t[0], t[-1])
+    save_or_show(fig, save_path)
+    return fig
+
+
+@styled
+def plot_forecast(result, save_path: str | None = None) -> plt.Figure:
+    """History, forecast with prediction interval, and held-out truth if any."""
+    fig, ax = plt.subplots(figsize=(12, 4))
+    n_hist = min(len(result.history), max(5 * len(result.mean), 200))
+    ax.plot(result.history_times[-n_hist:], result.history[-n_hist:],
+            color=COLORS["primary"], lw=1.2, label="history")
+    ax.fill_between(result.times, result.lower, result.upper, color=COLORS["secondary"],
+                    alpha=0.2, label=f"{result.level:.0%} interval")
+    ax.plot(result.times, result.mean, color=COLORS["secondary"], lw=2, label="forecast")
+    if result.actual is not None:
+        ax.plot(result.times, result.actual, color=COLORS["accent"], lw=1.2, ls="--", label="actual")
+    order = f"ARIMA{result.order}"
+    ax.set_title(f"{result.label} — {order} forecast")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Value")
+    ax.legend(fontsize=9, frameon=False)
+    save_or_show(fig, save_path)
+    return fig
+
+
+@styled
+def plot_events(data, fs=None, change_points=None, anomalies=None, label: str = "",
+                save_path: str | None = None) -> plt.Figure:
+    """Signal with change points (vertical lines) and anomalous windows (shaded)."""
+    fs = fs or 1.0
+    x = np.asarray(data)
+    t = np.arange(len(x)) / fs
+    fig, ax = plt.subplots(figsize=(13, 4))
+    ax.plot(t, x, color=COLORS["primary"], lw=0.8)
+    if anomalies is not None and len(anomalies):
+        for k, row in enumerate(anomalies[anomalies["anomaly"]].itertuples()):
+            ax.axvspan(row.t_start, row.t_end, color=COLORS["accent"], alpha=0.18,
+                       label="anomalous window" if k == 0 else None)
+    if change_points is not None:
+        for k, c in enumerate(change_points.times):
+            ax.axvline(c, color=COLORS["warning"], lw=1.6, ls="--",
+                       label="change point" if k == 0 else None)
+        for seg in change_points.segments.itertuples():
+            ax.hlines(seg.mean, seg.start_s, seg.end_s, color=COLORS["secondary"], lw=2)
+    ax.set_xlabel("Time (s)" if fs != 1.0 else "Sample")
+    ax.set_title(f"{label} — events")
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=9, frameon=False, loc="upper right")
+    ax.set_xlim(t[0], t[-1])
+    save_or_show(fig, save_path)
+    return fig
+
+
+@styled
+def plot_quality_timeline(timeline, label: str = "", save_path: str | None = None) -> plt.Figure:
+    """Quality score per window as a coloured strip — where is the recording bad?"""
+    fig, ax = plt.subplots(figsize=(13, 2.6))
+    colors = np.where(timeline["score"] >= 90, COLORS["secondary"],
+                      np.where(timeline["score"] >= 60, COLORS["warning"], COLORS["accent"]))
+    ax.bar(timeline["t_start"], timeline["score"], width=timeline["t_end"] - timeline["t_start"],
+           align="edge", color=colors, edgecolor="white", linewidth=0.3)
+    ax.set_ylim(0, 100)
+    ax.set_xlim(timeline["t_start"].iloc[0], timeline["t_end"].iloc[-1])
+    ax.set_ylabel("Score")
+    ax.set_xlabel("Time (s)")
+    ok = timeline["ok"].mean()
+    ax.set_title(f"{label} — quality over time ({ok:.0%} of windows OK)")
     save_or_show(fig, save_path)
     return fig

@@ -107,6 +107,7 @@ class FeatureMixin:
         peak_distance: int | None = None,
         peak_height: float | None = None,
         rr_filter: float | None = 0.3,
+        method: str | None = None,
     ) -> "FeatureMixin":
         """
         Heart-rate variability (hrv_*) from an ECG: R-peaks are detected,
@@ -114,6 +115,9 @@ class FeatureMixin:
         HR, triangular index, Poincaré SD1/SD2 and LF/HF power computed.
         Missing metrics are NaN. R-peak indices are kept in ``self.r_peaks``.
 
+        method    : R-peak detector — 'pantompkins' (default) or 'simple'
+                    (threshold; used automatically when peak_distance /
+                    peak_height are given, since those tune it)
         rr_filter : reject R-R intervals deviating more than this fraction from
                     the local median (missed/extra beats, ectopics).
                     None keeps every interval.
@@ -124,7 +128,8 @@ class FeatureMixin:
         self._require_fs("hrv_features")
 
         def _hrv(c):
-            r = F.detect_r_peaks(c, self.fs, peak_distance, peak_height)
+            m = method or ("simple" if peak_distance or peak_height is not None else "pantompkins")
+            r = F.detect_r_peaks(c, self.fs, peak_distance, peak_height, method=m)
             if len(r) < 4:
                 warnings.warn(
                     f"Only {len(r)} R-peaks detected; HRV needs >= 4. Check peak_height "

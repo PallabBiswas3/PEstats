@@ -4,13 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PBstats"
-version = "0.2.0"
+version = "0.3.0"
 description = "Signal-aware analysis: diagnose, clean, transform and featurise time series for ML"
 authors = [{ name = "Pallab Biswas", email = "pallabbiswas891@gmail.com" }]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-keywords = ["signal processing", "time series", "biosignals", "feature extraction", "machine learning", "ECG", "EEG"]
+keywords = ["signal processing", "time series", "biosignals", "feature extraction", "machine learning",
+            "ECG", "EEG", "HRV", "signal quality", "PhysioNet", "EDF"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "numpy>=1.26",
     "scipy>=1.12",
@@ -22,7 +35,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "black", "ruff", "mypy"]
+dev = ["pytest", "ruff"]
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
+dl = ["torch"]
+
+[project.urls]
+Homepage = "https://github.com/PallabBiswas3/PEstats"
+Documentation = "https://pallabbiswas3.github.io/PEstats/"
+Source = "https://github.com/PallabBiswas3/PEstats"
+Changelog = "https://github.com/PallabBiswas3/PEstats/blob/main/CHANGELOG.md"
+Issues = "https://github.com/PallabBiswas3/PEstats/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

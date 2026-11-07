@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 from scipy.signal import welch
 
 from PBstats.core.steps import step
@@ -162,8 +163,11 @@ def diagnose_signal(
     label: str = "",
     mains: float | None = None,
     drift_cutoff: float = 0.5,
+    signal_type: str | None = None,
 ) -> QualityReport:
     """Run every check on a 1D signal. See ``QualityMixin.diagnose``."""
+    if signal_type not in (None, "ecg"):
+        raise ValueError("signal_type must be None or 'ecg'")
     x = np.asarray(x, dtype=float)
     n = len(x)
     rep = QualityReport(label=label, n_samples=n, fs=fs, signal=x.copy())
@@ -343,7 +347,79 @@ def diagnose_signal(
                 f"Amplitude varies {ratio:.0f}× between segments — non-stationary. "
                 f"Prefer stft()/wavelet() over a single fft().", ratio)
 
+    # ── 8. Signal-specific checks ─────────────────────────────────────────
+    if signal_type == "ecg" and fs:
+        _ecg_checks(x, fs, rep, add)
+
     return rep
+
+
+# ECG signal-quality rules after Orphanidou et al., "Signal-quality indices for
+# the electrocardiogram and photoplethysmogram", IEEE JBHI 19(3), 2015.
+ECG_HR_RANGE = (40.0, 180.0)   # bpm
+ECG_MAX_GAP = 3.0              # s between beats
+ECG_RR_RATIO = 2.2             # max RR / min RR → 'irregular' note (info)
+ECG_TEMPLATE_CORR = 0.66       # median beat-to-template correlation
+
+
+def _ecg_checks(x: np.ndarray, fs: float, rep: QualityReport, add) -> None:
+    """Heartbeat plausibility + beat-morphology consistency."""
+    from scipy.signal import butter, sosfiltfilt
+
+    from PBstats.features.ecg import pan_tompkins
+
+    m = rep.metrics
+    if fs < 50 or len(x) < 3 * fs:
+        return
+    # Judge morphology on the diagnostic band so drift / mains (reported by
+    # their own checks) don't double-count as "noise" here.
+    hi = min(40.0, 0.45 * fs)
+    xf = sosfiltfilt(butter(2, [0.5, hi], btype="bandpass", fs=fs, output="sos"), x)
+    r = pan_tompkins(xf, fs)
+    dur = len(x) / fs
+    m["ecg_beats"] = int(len(r))
+    if len(r) < 3:
+        add("ecg_beats", "critical",
+            f"Only {len(r)} heartbeat(s) found in {dur:.0f} s — not a usable ECG "
+            f"(lead off, heavy noise, or not an ECG).", float(len(r)))
+        return
+
+    rr = np.diff(r) / fs
+    hr = 60.0 / rr.mean()
+    m["ecg_hr_bpm"] = float(hr)
+    m["ecg_rr_ratio"] = float(rr.max() / rr.min())
+    problems = []
+    if not ECG_HR_RANGE[0] <= hr <= ECG_HR_RANGE[1]:
+        problems.append(f"mean HR {hr:.0f} bpm")
+    if rr.max() > ECG_MAX_GAP:
+        problems.append(f"{rr.max():.1f} s without a beat")
+    if problems:
+        add("ecg_rhythm", "warning",
+            "Implausible beat sequence (" + "; ".join(problems) + ") — beats lost in noise, "
+            "lead-off, or a genuine pause/extreme rate.", float(hr))
+    elif m["ecg_rr_ratio"] > ECG_RR_RATIO:
+        # Irregular rhythm is clinical content (ectopics, AF), not a quality defect.
+        add("ecg_irregular", "info",
+            f"Irregular RR intervals (max/min {m['ecg_rr_ratio']:.1f}) — ectopic beats or "
+            f"arrhythmia, or occasional missed/extra detections.", m["ecg_rr_ratio"])
+
+    half = int(np.median(rr) * fs / 2)
+    beats = np.array([xf[i - half:i + half] for i in r if i - half >= 0 and i + half <= len(xf)])
+    if len(beats) >= 3 and half > 2:
+        # Median template + median correlation: robust to a minority of
+        # differently shaped beats (PVCs), still sensitive to noise, which
+        # corrupts most beats.
+        template = np.median(beats, axis=0)
+        tc = beats - beats.mean(axis=1, keepdims=True)
+        tt = template - template.mean()
+        corr = (tc @ tt) / (np.linalg.norm(tc, axis=1) * np.linalg.norm(tt) + 1e-300)
+        mc = float(np.median(corr))
+        m["ecg_template_corr"] = mc
+        if mc < ECG_TEMPLATE_CORR:
+            add("ecg_morphology", "warning",
+                f"Beats are inconsistent in shape (median correlation with the median beat "
+                f"{mc:.2f} < {ECG_TEMPLATE_CORR}) — in-band noise such as muscle or motion "
+                f"artefact, which filtering cannot remove.", mc)
 
 
 def _trend_check(x, rep, add) -> None:
@@ -376,6 +452,7 @@ class QualityMixin:
         mains: float | None = None,
         drift_cutoff: float | None = 0.5,
         verbose: bool = False,
+        signal_type: str | None = None,
     ) -> "QualityMixin":
         """
         Inspect the signal and grade its quality. Result in
@@ -390,19 +467,61 @@ class QualityMixin:
                        drift (default 0.5, suited to ECG/EEG/EMG). None
                        disables the drift check.
         verbose      : print the report
+        signal_type  : 'ecg' adds heartbeat checks — plausible heart rate /
+                       RR sequence, and beat-shape consistency (detects
+                       in-band muscle/motion noise that filters can't remove)
 
         Example
         -------
-        d = Data(raw_ecg, fs=500).diagnose(verbose=True)
+        d = Data(raw_ecg, fs=500).diagnose(signal_type="ecg", verbose=True)
         d.quality_report.pipeline.save("ecg_clean.json")
         """
         x = require_1d(self.data, "diagnose")
         self.quality_report = diagnose_signal(
             x, self.fs, self.label, mains=mains, drift_cutoff=drift_cutoff,
+            signal_type=signal_type,
         )
         if verbose:
             self.quality_report.summary()
         return self
+
+    def quality_timeline(
+        self,
+        window: float = 10.0,
+        step: float | None = None,
+        **diagnose_kwargs,
+    ) -> pd.DataFrame:
+        """
+        Diagnose the recording in sliding windows — *where* is it bad?
+        A long recording is rarely uniformly good or bad; this finds the
+        stretches to discard or inspect.
+
+        Parameters
+        ----------
+        window : window length in seconds (samples without fs)
+        step   : hop (default = window)
+        diagnose_kwargs : passed to ``diagnose`` (mains, drift_cutoff, signal_type)
+
+        Returns
+        -------
+        DataFrame: t_start, t_end, score, grade, ok, issues (comma-separated codes).
+        """
+        x = require_1d(self.data, "quality_timeline")
+        scale = self.fs or 1.0
+        win = int(round(window * scale))
+        hop = int(round((step or window) * scale))
+        if win < 32 or win > len(x):
+            raise ValueError(f"window must span 32..{len(x)} samples, got {win}")
+        rows = []
+        for i in range(0, len(x) - win + 1, hop):
+            rep = diagnose_signal(x[i:i + win], self.fs, self.label, **diagnose_kwargs)
+            rows.append({
+                "t_start": i / scale, "t_end": (i + win) / scale,
+                "score": rep.score, "grade": rep.grade, "ok": rep.ok,
+                "issues": ",".join(sorted({iss.code for iss in rep.issues if iss.severity != "info"})),
+            })
+        self.quality_timeline_result = pd.DataFrame(rows)
+        return self.quality_timeline_result
 
     @step
     def auto_clean(

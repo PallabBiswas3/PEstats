@@ -1,19 +1,27 @@
 # PBstats
 
-**From a raw, messy recording to ML-ready features — with a diagnosis, a reproducible recipe, and a scikit-learn model at the end.**
+[![tests](https://github.com/PallabBiswas3/PEstats/actions/workflows/tests.yml/badge.svg)](https://github.com/PallabBiswas3/PEstats/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/PBstats.svg)](https://pypi.org/project/PBstats/)
+[![Python](https://img.shields.io/pypi/pyversions/PBstats.svg)](https://pypi.org/project/PBstats/)
+[![docs](https://img.shields.io/badge/docs-online-5B4FCF.svg)](https://pallabbiswas3.github.io/PEstats/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-PBstats is a signal-aware analysis framework for time series and biosignals (ECG, EEG, EMG, vibration, spectroscopy, sensors). It gives you a fluent, chainable API for cleaning, filtering, transforming, testing and featurising signals. Three things make it different from a bag of SciPy wrappers:
+**From a raw, messy recording to ML-ready features — with a diagnosis, a reproducible recipe, and a model at the end.**
 
-1. **It tells you what's wrong with your signal.** `diagnose()` checks for gaps, sensor dropout, clipping, impulse spikes, baseline drift, power-line interference, broadband noise and non-stationarity. It then grades the recording 0–100 and *prescribes* an ordered cleaning pipeline. `auto_clean()` applies it.
-2. **Your exploration becomes your pipeline.** Every chained call is recorded in a structured form, so `d.to_pipeline()` turns what you just tried interactively into a saveable, replayable `Pipeline`. Then you can run it on a whole dataset.
-3. **It plugs straight into machine learning.** `SignalFeatureExtractor` is a scikit-learn transformer: raw signals in, ~50 time, spectral, nonlinear, peak and HRV features out. Cleaning happens *inside* the model, so cross-validation stays honest.
+PBstats is a signal-aware analysis library for time series and biosignals (ECG, EEG, EMG, vibration, sensors, spectroscopy). One chainable `Data` object takes you through loading, diagnosis, cleaning, transforms, statistics, events, features and machine learning. What makes it different:
+
+1. **It tells you what's wrong with your signal.** `diagnose()` finds gaps, dropout, clipping, spikes, drift, mains interference and noise — and for ECG, implausible rhythms and inconsistent beat shapes. It grades the recording 0–100 and *prescribes* a cleaning pipeline. Accuracy is [measured on PhysioNet](#benchmarks), not assumed.
+2. **Your exploration becomes your pipeline.** Every chained call is recorded, so `d.to_pipeline()` turns what you tried interactively into a saveable pipeline you can run on a whole dataset.
+3. **It plugs into machine learning.** A scikit-learn transformer for features, plus augmentation with realistic artefacts and windowing for deep learning.
+4. **It reads real data and writes shareable reports.** CSV, WAV, EDF/EDF+/BDF and PhysioNet — pure Python, verified identical to the reference libraries — and one-file HTML reports.
+
+📖 **Documentation: <https://pallabbiswas3.github.io/PEstats/>**
 
 ## Installation
 
 ```bash
-git clone https://github.com/PallabBiswas3/PEstats.git
-cd PEstats
-pip install -e .          # editable install: your edits take effect immediately
+pip install PBstats
+pip install "PBstats[dl]"     # + PyTorch dataset helpers
 ```
 
 ## 60-second tour
@@ -21,117 +29,114 @@ pip install -e .          # editable install: your edits take effect immediately
 ```python
 from PBstats import Data
 
-d = Data(raw_ecg, fs=500, label="patient_001")
+d = Data.from_physionet("mitdb/105", channels="MLII")      # real ECG, downloaded once and cached
+d.diagnose(signal_type="ecg", verbose=True)                # what's wrong with it?
+d.auto_clean()                                             # apply the prescribed fixes
+d.hrv_features().feature_vector.to_series()                # Pan-Tompkins beats → HRV
+d.report("mitdb_105.html", signal_type="ecg")              # one-file shareable report
+```
 
-d.diagnose(verbose=True)
-```
-```
+```text
 Signal diagnosis — 'patient_001'  (15000 samples, 30.0 s @ 500 Hz)
-────────────────────────────────────────────────────────────────
   Quality  █████░░░░░░░░░░░░░░░  26/100  grade F
-────────────────────────────────────────────────────────────────
   ✖ [critical] Power-line interference at 50 Hz (42 dB above the local background).
   ▲ [warning ] 60 missing samples (0.4%) in 1 gap(s) — filters and FFTs fail on NaN.
   ▲ [warning ] 6 impulse spike sample(s) (> 10× both noise level and local slope) — ...
   ▲ [warning ] 72% of the power is below 0.5 Hz — baseline wander/drift. ...
-  • [info    ] Large DC offset (|mean| = 2.8× std) — dominates the 0 Hz bin of spectra.
-────────────────────────────────────────────────────────────────
   Prescription (apply with .auto_clean() or report.pipeline):
     1. remove_missing(strategy='interpolate')
     2. remove_outliers(method='spike', threshold=10.0, window=5)
     3. highpass(cutoff=0.5)
     4. notch(freq=50.0, harmonics=False)
 ```
-```python
-d.plot_quality()                      # signal with problem regions highlighted + PSD
-d.auto_clean()                        # 26/100 → 100/100
-d.auto_features(include=["time", "freq", "nonlinear", "hrv"])
-d.feature_vector.to_series()          # ~50 named features
-```
 
 ## Explore once, replay everywhere
 
 ```python
-d = (Data(x, fs=500)
-     .remove_missing()
-     .bandpass(0.5, 40)
-     .notch(50)
-     .standardize())
+d = Data(x, fs=500).remove_missing().bandpass(0.5, 40).notch(50).standardize()
 
-pipe = d.to_pipeline("ecg_clean")     # exactly what you did, with every argument
+pipe = d.to_pipeline("ecg_clean")          # exactly what you did, with every argument
 pipe.save("ecg_clean.json")
-
-cleaned = Pipeline.load("ecg_clean.json").run_batch(
-    [Data(s, fs=500, label=f"rec_{i}") for i, s in enumerate(dataset)],
-    on_error="warn",
-)
+cleaned = Pipeline.load("ecg_clean.json").run_batch(recordings, on_error="warn")
 ```
 
-Pipelines compose (`clean + features`), refuse to call private methods when loaded from JSON, and can run on a copy (`pipe.run(d, copy=True)`) to leave the input untouched.
+## Events, epochs and forecasting
+
+```python
+d.detect_change_points()                   # exact PELT segmentation → d.change_point_result
+d.anomaly_scores(window=5)                 # Isolation Forest over windowed features
+ep = d.epochs("N", tmin=-0.25, tmax=0.45)  # cut around annotated events
+ep.average().plot()                        # ERP / average heartbeat
+d.forecast(horizon=10, holdout=100)        # ARIMA, honest held-out metrics
+d.quality_timeline(window=10)              # where is a long recording bad?
+```
 
 ## Machine learning
 
 ```python
 from sklearn.pipeline import make_pipeline
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import cross_val_score
-from PBstats import Pipeline, SignalFeatureExtractor
+from PBstats import Augmenter, Pipeline, SignalFeatureExtractor, make_windows, to_torch_dataset
 
-model = make_pipeline(
-    SignalFeatureExtractor(
-        fs=250,
-        include=["time", "freq", "nonlinear"],
-        preprocess=Pipeline("clean").add("bandpass", low=1, high=40),
-        n_jobs=-1,
-    ),
+model = make_pipeline(                                  # cleaning lives inside the model,
+    SignalFeatureExtractor(fs=250, include=["time", "freq", "nonlinear"],   # so CV stays honest
+                           preprocess=Pipeline("clean").add("bandpass", low=1, high=40)),
     RandomForestClassifier(),
 )
-cross_val_score(model, X_signals, y, cv=5)    # X: (n_signals, n_samples) or ragged list
+
+X, y = make_windows(recordings, window=10, step=5, labels=labels)       # (N, C, T) float32
+aug = Augmenter(fs=250, powerline=0.3, wander=0.3, spikes=0.2, seed=0)  # artefacts diagnose() knows
+ds = to_torch_dataset(X, y, augmenter=aug)                              # on-the-fly augmentation
 ```
 
-Prefer a table? `extract_features(signals, fs, labels=y)` returns a DataFrame. For long recordings, `d.windowed_features(window=30, step=10)` turns one signal into a feature *time series*. That's the standard input for sleep staging, activity recognition, seizure detection and fault detection.
+## Benchmarks
+
+Reproducible with the scripts in [`benchmarks/`](benchmarks/) on public PhysioNet data.
+
+**R-peak detection, MIT-BIH Arrhythmia Database** (48 records, 109,494 beats, ±150 ms):
+
+| Detector | Sensitivity | +Predictivity | F1 |
+|---|---|---|---|
+| Pan-Tompkins (default) | **99.57 %** | **99.11 %** | **99.34 %** |
+| Simple threshold | 88.62 % | 93.67 % | 91.08 % |
+
+**Signal quality, MIT-BIH Noise Stress Test Database** (10-s windows with known noise; `signal_type="ecg"`):
+
+| Noise SNR | 24 dB | 18 dB | 12 dB | 6 dB | 0 dB | −6 dB | False alarms (clean ECG) |
+|---|---|---|---|---|---|---|---|
+| Noisy windows flagged | 5 % | 17 % | 74 % | 91 % | 90 % | 84 % | **3.6 %** |
+
+![Quality over time on NSTDB record 118e06 — flagged blocks match the known noise segments](docs/img/nstdb_timeline.png)
+
+Detection rises exactly where noise starts to break beat detection (Pan-Tompkins F1 is still 99.97 % at 18 dB, 96.9 % at 12 dB). Details and caveats: [Benchmarks](https://pallabbiswas3.github.io/PEstats/benchmarks/).
 
 ## What's inside
 
 | Area | Highlights |
 |---|---|
-| **Diagnostics** | `diagnose`, `auto_clean`, `plot_quality` — 0–100 score, issue list, prescribed `Pipeline` |
-| **Cleaning** | `remove_missing` (interpolate / ffill / bfill / mean / median / drop), `impute` (incl. KNN across channels), `remove_outliers` (zscore / iqr / mad / hampel / **spike**), `winsorize`, `clip`, `crop`, `remove_dc`, `detrend` (linear / poly) |
-| **Filters** | zero-phase Butterworth `lowpass` / `highpass` / `bandpass` / `bandstop`, `notch` (+ harmonics), linear-phase `fir_filter`, `savgol`, `median_filter`, polyphase `resample` (non-integer rates), `plot_filter_response` |
-| **Transforms** | amplitude-calibrated `fft`, Welch `psd`, `stft`, `wavelet` (CWT, log-spaced), `hilbert` (envelope, phase, inst. frequency) |
-| **Statistics** | `describe` (incl. RMS, MAD, SNR), normality & stationarity tests, Welch t-test with Cohen's d, Mann-Whitney with rank-biserial r, `correlate`, FFT `autocorrelation`, `cross_correlation` (time-delay estimation), `coherence` |
-| **Features** | time domain + Hjorth; Welch spectral shape, edges, EEG band powers; sample entropy (KD-tree), permutation entropy, Higuchi fractal dimension, DFA α; peak statistics; HRV (SDNN, RMSSD, pNN50, Poincaré SD1/SD2, LF/HF) with RR-artefact rejection |
-| **Visualisation** | signal, spectrum, PSD with bands, spectrogram, scalogram, envelope, stats panel, ACF, correlation matrix, quality report, 6-panel `dashboard` — scoped styling that never touches your global matplotlib settings |
+| **Loading** | `from_csv` (fs from timestamps), `from_wav`, `from_edf` (EDF/EDF+/BDF + annotations), `from_wfdb`, `from_physionet` |
+| **Diagnostics** | `diagnose` (+ ECG checks), `auto_clean`, `quality_timeline`, `plot_quality`, `report` |
+| **Cleaning** | `remove_missing`, `impute` (incl. KNN), `remove_outliers` (zscore / iqr / mad / hampel / spike), `winsorize`, `clip`, `crop`, `remove_dc`, `detrend` |
+| **Filters** | zero-phase Butterworth low/high/band-pass/stop, `notch` (+ harmonics), FIR, Savitzky-Golay, median, polyphase `resample` |
+| **Transforms** | amplitude-calibrated `fft`, Welch `psd`, `stft`, `wavelet`, `hilbert` |
+| **Statistics** | `describe`, normality & stationarity tests, t-test with Cohen's d, Mann-Whitney with rank-biserial r, correlation, autocorrelation, cross-correlation, coherence |
+| **Events** | `detect_change_points` (PELT), `anomaly_scores`, `epochs`, `forecast` (ARIMA) |
+| **Features** | time + Hjorth; spectral; sample/permutation entropy, Higuchi FD, DFA; peaks; HRV with Pan-Tompkins, R-R artefact rejection, Poincaré, LF/HF |
+| **ML / DL** | `SignalFeatureExtractor`, `extract_features`, `windowed_features`, `Augmenter`, `make_windows`, `to_torch_dataset` |
 
-**Multichannel:** pass a 2D array `(n_samples, n_channels)` or a DataFrame (columns = channels). Cleaning, normalisation and filters work per channel along time. Features are prefixed with the channel name (`Fz__td_rms`). Use `d.channel("Fz")` for single-channel transforms.
+Multichannel data — a 2D array `(n_samples, n_channels)` or a DataFrame — is handled per channel throughout.
 
-## Design notes
-
-- **Every method returns `self`** for chaining. Results land on attributes (`fft_result`, `psd_result`, `quality_report`, `feature_vector`, …).
-- **Transforms that change the domain** (`fft`, `hilbert`, `stft`, `wavelet`) replace `self.data` with their output so a chain can continue. Analysis methods (`psd`, `describe`, `diagnose`, features) never modify the data.
-- **`reset()`** restores the original data *and* sampling rate, and clears all history and results. **`copy()`** gives an independent branch.
-- **Diagnosis is heuristic.** Thresholds are documented constants in `PBstats/diagnostics/quality.py`. They were tuned on biosignals and validated for zero false alarms on clean synthetic ECG at 250–1000 Hz. If slow content *is* your signal (e.g. respiration), pass `drift_cutoff=None`.
-
-## Demo and tests
+## Development
 
 ```bash
-python examples/demo.py          # messy ECG → diagnosis → pipeline → features → classifier
-python -m pytest                 # 114 tests
+git clone https://github.com/PallabBiswas3/PEstats.git && cd PEstats
+pip install -e ".[dev]"
+python -m pytest                    # 149 tests
+python examples/demo.py             # messy ECG → diagnosis → pipeline → features → classifier
+python benchmarks/rpeaks_mitdb.py   # reproduce the benchmarks
 ```
 
-## Project structure
-
-```
-PBstats/
-  core/           Data, Pipeline, step recording, result containers
-  diagnostics/    signal-quality diagnosis and auto-cleaning
-  preprocessing/  cleaning, imputation, outliers, normalisation, filters
-  transforms/     FFT, Welch PSD, STFT, CWT, Hilbert
-  statistics/     descriptive, hypothesis tests, regression, correlation
-  features/       pure feature functions + Data feature methods
-  visualization/  plotting
-  ml.py           scikit-learn transformer and batch feature extraction
-```
+Releases are published to PyPI automatically when a GitHub Release is created (see [CHANGELOG](CHANGELOG.md)).
 
 ---
 Developed with passion for the signal processing community.

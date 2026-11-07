@@ -8,11 +8,14 @@ PBstats — signal-aware analysis, from raw recording to ML-ready features.
 """
 from PBstats.core.data import Data
 from PBstats.core.pipeline import FunctionalPipeline, Pipeline
+from PBstats.augment import Augmenter, make_windows, to_torch_dataset
 from PBstats.diagnostics.quality import QualityReport
+from PBstats.epochs import Epochs
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
-    "Data", "Pipeline", "FunctionalPipeline", "QualityReport",
+    "Data", "Pipeline", "FunctionalPipeline", "QualityReport", "Epochs",
+    "Augmenter", "make_windows", "to_torch_dataset",
     "SignalFeatureExtractor", "extract_features",
 ]
 

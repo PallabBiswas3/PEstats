@@ -87,6 +87,31 @@ class VisualizationMixin:
         plots.plot_quality(self.quality_report, save_path=save_path)
         return self
 
+    def plot_quality_timeline(self, window: float = 10.0, save_path: str | None = None,
+                              **diagnose_kwargs) -> "VisualizationMixin":
+        """Quality score per window. Runs .quality_timeline() if needed."""
+        tl = getattr(self, "quality_timeline_result", None)
+        if tl is None:
+            tl = self.quality_timeline(window=window, **diagnose_kwargs)
+        plots.plot_quality_timeline(tl, self.label, save_path=save_path)
+        return self
+
+    def plot_events(self, save_path: str | None = None) -> "VisualizationMixin":
+        """Signal with detected change points and anomalous windows.
+        Requires .detect_change_points() and/or .anomaly_scores()."""
+        cp = getattr(self, "change_point_result", None)
+        an = getattr(self, "anomaly_result", None)
+        if cp is None and an is None:
+            raise RuntimeError("Call .detect_change_points() or .anomaly_scores() before .plot_events().")
+        plots.plot_events(self.data, self.fs, cp, an, self.label, save_path=save_path)
+        return self
+
+    def plot_forecast(self, save_path: str | None = None) -> "VisualizationMixin":
+        """History + forecast with prediction interval. Requires .forecast()."""
+        self._need("forecast_result", "forecast", "plot_forecast")
+        plots.plot_forecast(self.forecast_result, save_path=save_path)
+        return self
+
     def dashboard(self, save_path: str | None = None) -> "VisualizationMixin":
         """
         Six-panel overview: raw vs processed signal, spectrum, envelope,

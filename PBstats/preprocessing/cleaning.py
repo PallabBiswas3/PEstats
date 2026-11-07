@@ -106,5 +106,12 @@ class CleaningMixin:
         if i1 <= i0:
             raise ValueError(f"Empty crop: start={start}, end={end} (signal has {n} samples)")
         self.data = self.data[i0:i1].copy()
+        # Keep attached events aligned with the new time origin.
+        ann = getattr(self, "annotations", None)
+        if ann is not None and len(ann) and self.fs:
+            t0, t1 = i0 / self.fs, i1 / self.fs
+            ann = ann[(ann["onset"] >= t0) & (ann["onset"] < t1)].copy()
+            ann["onset"] -= t0
+            self.annotations = ann.reset_index(drop=True)
         self._record(f"crop(start={start}, end={end})")
         return self

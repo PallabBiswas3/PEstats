@@ -109,11 +109,12 @@ class SignalFeatureExtractor(TransformerMixin, BaseEstimator):
                  (cleaning lives inside the model → no CV leakage)
     n_jobs     : parallel workers for transform (joblib)
 
-    Input  X : array (n_signals, n_samples) or list of 1D arrays.
-    Output   : array (n_signals, n_features); names via
-               ``get_feature_names_out()``. Features that cannot be computed
-               for a signal are NaN — add a ``SimpleImputer`` if your model
-               cannot handle NaN.
+    Notes
+    -----
+    Input ``X`` is an array (n_signals, n_samples) or a list of 1D arrays.
+    Output is an array (n_signals, n_features); names via
+    ``get_feature_names_out()``. Features that cannot be computed for a
+    signal are NaN — add a ``SimpleImputer`` if your model cannot handle NaN.
     """
 
     def __init__(self, fs: float = 1.0, include=None, preprocess=None, n_jobs=None):

@@ -297,14 +297,12 @@ def peaks(
 
 def detect_r_peaks(
     x: np.ndarray, fs: float, distance: int | None = None, height: float | None = None,
+    method: str = "pantompkins",
 ) -> np.ndarray:
-    """Simple R-peak detector: find_peaks with refractory period (default 0.3 s
-    → up to 200 bpm) and height threshold (default 50% of the 99th percentile,
-    which is robust to a single artefact spike)."""
-    x = np.asarray(x, dtype=float)
-    distance = distance or max(int(0.3 * fs), 1)
-    height = height if height is not None else 0.5 * np.percentile(x, 99)
-    return find_peaks(x, distance=distance, height=height)[0]
+    """R-peak indices — Pan-Tompkins by default; method="simple" for the
+    plain threshold detector. See ``PBstats.features.ecg``."""
+    from PBstats.features.ecg import detect_r_peaks as _detect
+    return _detect(x, fs, method=method, distance=distance, height=height)
 
 
 HRV_KEYS = (

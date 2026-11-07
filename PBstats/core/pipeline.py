@@ -123,7 +123,9 @@ class Pipeline:
         verbose  : print each step with its duration
         copy     : run on a copy, leaving ``data_obj`` untouched
 
-        Returns the processed Data object.
+        Returns
+        -------
+        The processed Data object.
         """
         if copy:
             data_obj = data_obj.copy()
